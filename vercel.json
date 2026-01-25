@@ -1,0 +1,12 @@
+{
+  "crons": [
+    {
+      "path": "/api/update-dolar",
+      "schedule": "0 9 * * *"
+    },
+    {
+      "path": "/api/sync-pst",
+      "schedule": "0 10 * * *"
+    }
+  ]
+}
