@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
-import { supabase, ResumenFinanciero } from '@/lib/supabase'
+import { supabase, ResumenFinanciero, CobroDetalle } from '@/lib/supabase'
 import { 
   DollarSign, 
   TrendingUp, 
@@ -10,20 +10,39 @@ import {
   LogOut,
   Loader2,
   Users,
-  Settings
+  Settings,
+  Briefcase,
+  Wallet,
+  RefreshCw,
+  Clock
 } from 'lucide-react'
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts'
+import { usePeriodo } from '@/contexts/PeriodoContext'
+import PeriodoSelector from '@/components/PeriodoSelector'
+import CobrosPendientesPanel from '@/components/CobrosPendientesPanel'
 
 export default function DashboardPage() {
   const router = useRouter()
+  const { periodoSeleccionado } = usePeriodo()
   const [loading, setLoading] = useState(true)
   const [resumen, setResumen] = useState<ResumenFinanciero | null>(null)
   const [userName, setUserName] = useState<string>('')
+  const [cobrosSemana, setCobrosSemana] = useState<CobroDetalle[]>([])
+  const [totalSemana, setTotalSemana] = useState<number>(0)
+  const [dolarBlue, setDolarBlue] = useState<number>(1200)
+  const [sincronizandoPst, setSincronizandoPst] = useState(false)
+  const [mensajePst, setMensajePst] = useState<string | null>(null)
+  const [cashbackHold, setCashbackHold] = useState<number>(0)
+  const [vistaActiva, setVistaActiva] = useState<'liquidez' | 'performance'>('liquidez')
 
   useEffect(() => {
     checkAuth()
-    loadDashboardData()
   }, [])
+
+  useEffect(() => {
+    loadDashboardData()
+    loadCobrosPendientes()
+  }, [periodoSeleccionado, vistaActiva])
 
   const checkAuth = async () => {
     const { data: { session } } = await supabase.auth.getSession()
@@ -40,21 +59,23 @@ export default function DashboardPage() {
     try {
       setLoading(true)
 
-      // Obtener ingresos de Enero 2026
+      // Obtener ingresos según la vista activa
+      // LIQUIDEZ: Todo lo cobrado en este periodo (periodo = fecha de cobro)
+      // PERFORMANCE: Solo lo que corresponde a este mes de servicio (mes_aplicado)
+      const campoFiltro = vistaActiva === 'liquidez' ? 'periodo' : 'mes_aplicado'
+      
       const { data: ingresos, error: ingresosError } = await supabase
         .from('ingresos')
-        .select('monto_ars, monto_usd_total')
-        .gte('fecha_cobro', '2026-01-01')
-        .lte('fecha_cobro', '2026-01-31')
+        .select('monto_ars, monto_usd_total, fecha_cobro, periodo, mes_aplicado')
+        .eq(campoFiltro, periodoSeleccionado)
 
       if (ingresosError) throw ingresosError
 
-      // Obtener costos de Enero 2026 (con tipos)
+      // Obtener costos del periodo seleccionado (con tipos)
       const { data: costos, error: costosError } = await supabase
         .from('costos')
         .select('monto_usd, tipo, nombre, observacion')
-        .gte('created_at', '2026-01-01')
-        .lte('created_at', '2026-01-31')
+        .eq('periodo', periodoSeleccionado)
 
       if (costosError) throw costosError
 
@@ -76,6 +97,37 @@ export default function DashboardPage() {
 
       if (honorarioError) throw honorarioError
 
+      // Obtener balance neto de PST.NET desde configuración
+      const { data: configPstBalance, error: pstBalanceError } = await supabase
+        .from('configuracion')
+        .select('valor_numerico')
+        .eq('clave', 'pst_balance_neto')
+        .single()
+
+      // No lanzar error si no existe, simplemente usar 0
+      const pst_balance_neto = pstBalanceError ? 0 : (parseFloat(String(configPstBalance?.valor_numerico || 0)))
+
+      // Obtener dólar blue para conversión a ARS
+      const { data: configDolar, error: dolarError } = await supabase
+        .from('configuracion')
+        .select('valor_numerico')
+        .eq('clave', 'dolar_conversion')
+        .single()
+
+      // No lanzar error si no existe, usar valor por defecto
+      const dolar_conversion = dolarError ? 1200 : (parseFloat(String(configDolar?.valor_numerico || 1200)))
+      setDolarBlue(dolar_conversion)
+
+      // Obtener hold cashback para mostrar "Próximo Ingreso"
+      const { data: configHold, error: holdError } = await supabase
+        .from('configuracion')
+        .select('valor_numerico')
+        .eq('clave', 'pst_cashback_hold')
+        .single()
+
+      const cashback_hold = holdError ? 0 : (parseFloat(String(configHold?.valor_numerico || 0)))
+      setCashbackHold(cashback_hold)
+
       // Calcular costo dinámico de Agustín (solo clientes que comisionan)
       const costoAgustin = (clientesComisionAgustin || 0) * (parseFloat(String(configHonorario?.valor_numerico || 0)))
 
@@ -95,7 +147,12 @@ export default function DashboardPage() {
       const total_usd = ingresos?.reduce((acc, ing) => acc + (parseFloat(String(ing.monto_usd_total || 0))), 0) || 0
       const total_costos_fijos = costos?.reduce((acc, cost) => acc + (parseFloat(String(cost.monto_usd || 0))), 0) || 0
       const total_costos = total_costos_fijos + costoAgustin
-      const neto_usd = total_usd - total_costos
+      
+      // Neto de honorarios (sin PST)
+      const neto_honorarios = total_usd - total_costos
+      
+      // NETO TOTAL: Honorarios + Balance PST.NET
+      const neto_usd = neto_honorarios + pst_balance_neto
 
       setResumen({
         total_ars,
@@ -103,6 +160,7 @@ export default function DashboardPage() {
         total_costos,
         neto_usd,
         ingresos_proyectados,
+        pst_balance_neto, // Agregamos para mostrar en UI
       })
     } catch (error) {
       console.error('Error al cargar datos:', error)
@@ -111,9 +169,93 @@ export default function DashboardPage() {
     }
   }
 
+  const loadCobrosPendientes = async () => {
+    try {
+      // Llamar a la función SQL que devuelve el detalle completo
+      const { data, error } = await supabase
+        .rpc('obtener_detalle_cobros_semana')
+
+      if (error) throw error
+
+      if (data && data.length > 0) {
+        // Obtener los cobros ya registrados en este periodo
+        const { data: cobrosRegistrados, error: errorCobros } = await supabase
+          .from('ingresos')
+          .select('cliente_id')
+          .eq('periodo', periodoSeleccionado)
+
+        if (errorCobros) throw errorCobros
+
+        const clientesCobrados = new Set(cobrosRegistrados?.map(c => c.cliente_id) || [])
+
+        // Marcar los cobros que ya fueron registrados
+        const cobrosConEstado = data.map((cobro: any) => ({
+          ...cobro,
+          ya_cobrado: clientesCobrados.has(cobro.cliente_id)
+        }))
+
+        setCobrosSemana(cobrosConEstado as CobroDetalle[])
+        // Calcular el total sumando solo los no cobrados
+        const total = cobrosConEstado
+          .filter((c: any) => !c.ya_cobrado)
+          .reduce((acc: number, cobro: any) => 
+            acc + (parseFloat(String(cobro.fee_monto || 0))), 0)
+        setTotalSemana(total)
+      } else {
+        setCobrosSemana([])
+        setTotalSemana(0)
+      }
+    } catch (error) {
+      console.error('Error al cargar cobros pendientes:', error)
+      setCobrosSemana([])
+      setTotalSemana(0)
+    }
+  }
+
   const handleLogout = async () => {
     await supabase.auth.signOut()
     router.replace('/login')
+  }
+
+  const handleCobroRegistrado = () => {
+    // Refrescar todos los datos del dashboard
+    loadDashboardData()
+    loadCobrosPendientes()
+  }
+
+  const handleSincronizarPst = async () => {
+    try {
+      setSincronizandoPst(true)
+      setMensajePst(null)
+
+      // Llamar directamente al backend de Render
+      const response = await fetch('https://black-infra-api-pure.onrender.com/sync-pst', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        }
+      })
+
+      const data = await response.json()
+
+      if (data.success) {
+        // Recargar datos del dashboard para mostrar el nuevo balance PST
+        await loadDashboardData()
+        setMensajePst('¡Actualizado!')
+        
+        // Limpiar mensaje después de 2 segundos
+        setTimeout(() => setMensajePst(null), 2000)
+      } else {
+        setMensajePst('Error al sincronizar')
+        setTimeout(() => setMensajePst(null), 3000)
+      }
+    } catch (error) {
+      console.error('Error al sincronizar PST:', error)
+      setMensajePst('Error de conexión')
+      setTimeout(() => setMensajePst(null), 3000)
+    } finally {
+      setSincronizandoPst(false)
+    }
   }
 
   const formatNumber = (num: number) => {
@@ -130,11 +272,21 @@ export default function DashboardPage() {
     }).format(num)
   }
 
-  // Datos para el gráfico
+  // Convertir periodo (MM-YYYY) a formato legible para el gráfico
+  const formatearPeriodoGrafico = (periodo: string) => {
+    const [mes, anio] = periodo.split('-')
+    const meses = [
+      'Ene', 'Feb', 'Mar', 'Abr', 'May', 'Jun',
+      'Jul', 'Ago', 'Sep', 'Oct', 'Nov', 'Dic'
+    ]
+    return `${meses[parseInt(mes) - 1]} ${anio}`
+  }
+
+  // Datos para el gráfico (Ingresos totales incluyen PST.NET)
   const chartData = [
     {
-      name: 'Enero 2026',
-      Ingresos: resumen?.total_usd || 0,
+      name: formatearPeriodoGrafico(periodoSeleccionado),
+      Ingresos: (resumen?.total_usd || 0) + (resumen?.pst_balance_neto || 0),
       Gastos: resumen?.total_costos || 0,
     },
   ]
@@ -154,7 +306,7 @@ export default function DashboardPage() {
     <div className="min-h-screen bg-black safe-area-inset-top safe-area-inset-bottom">
       {/* Header */}
       <header className="glass-card border-b border-white/5">
-        <div className="mobile-optimized py-3">
+        <div className="mobile-optimized py-3 space-y-3">
           <div className="flex items-center justify-between">
             <div>
               <h1 className="text-xl font-bold text-white">Dashboard</h1>
@@ -168,6 +320,39 @@ export default function DashboardPage() {
               Salir
             </button>
           </div>
+          
+          {/* Time Machine - Selector de Periodo */}
+          <div className="w-full">
+            <PeriodoSelector />
+          </div>
+
+          {/* Selector de Vista: Liquidez vs Performance */}
+          <div className="w-full flex gap-2">
+            <button
+              onClick={() => setVistaActiva('liquidez')}
+              className={`
+                flex-1 px-4 py-2.5 rounded-xl font-semibold text-xs transition-all
+                ${vistaActiva === 'liquidez'
+                  ? 'bg-neon-green/20 text-neon-green border-2 border-neon-green/50 shadow-lg shadow-neon-green/20'
+                  : 'bg-white/5 text-gray-400 border border-white/10 hover:bg-white/10'
+                }
+              `}
+            >
+              💰 Liquidez Actual
+            </button>
+            <button
+              onClick={() => setVistaActiva('performance')}
+              className={`
+                flex-1 px-4 py-2.5 rounded-xl font-semibold text-xs transition-all
+                ${vistaActiva === 'performance'
+                  ? 'bg-blue-500/20 text-blue-400 border-2 border-blue-500/50 shadow-lg shadow-blue-500/20'
+                  : 'bg-white/5 text-gray-400 border border-white/10 hover:bg-white/10'
+                }
+              `}
+            >
+              📊 Performance Mensual
+            </button>
+          </div>
         </div>
       </header>
 
@@ -175,17 +360,120 @@ export default function DashboardPage() {
       <main className="mobile-optimized py-4 space-y-4">
         {/* KPIs Section */}
         <div className="grid grid-cols-1 gap-3">
-          {/* KPI 1: Neto USD - Hero Card */}
+          {/* KPI 1: Neto USD - Hero Card con Desglose */}
           <div className="glass-card-strong rounded-2xl p-5 neon-green-glow border-neon-green/20">
             <div className="flex items-center justify-between mb-3">
               <div className="p-2.5 bg-neon-green/10 rounded-xl backdrop-blur-sm border border-neon-green/20">
                 <DollarSign className="h-5 w-5 text-neon-green" />
               </div>
-              <span className="text-xs text-gray-500 px-2 py-1 rounded-md bg-white/5">Ene 2026</span>
+              <span className="text-xs text-gray-500 px-2 py-1 rounded-md bg-white/5">
+                {formatearPeriodoGrafico(periodoSeleccionado)}
+              </span>
             </div>
             <div>
-              <p className="text-xs font-medium text-gray-400 mb-1">Neto USD</p>
+              <div className="flex items-center gap-2 mb-1">
+                <p className="text-xs font-medium text-gray-400">
+                  {vistaActiva === 'liquidez' ? '💰 Liquidez Total' : '📊 Neto del Mes'}
+                </p>
+                <span className={`text-[9px] px-1.5 py-0.5 rounded-md ${
+                  vistaActiva === 'liquidez' 
+                    ? 'bg-neon-green/10 text-neon-green/80 border border-neon-green/20' 
+                    : 'bg-blue-500/10 text-blue-400/80 border border-blue-500/20'
+                }`}>
+                  {vistaActiva === 'liquidez' ? 'Todo cobrado' : 'Solo este mes'}
+                </span>
+              </div>
               <p className="text-4xl font-bold neon-text-green">${formatCurrency(resumen?.neto_usd || 0)}</p>
+              
+              {/* Conversión a ARS */}
+              <p className="text-lg text-gray-400 mt-2">
+                ${formatNumber((resumen?.neto_usd || 0) * dolarBlue)} ARS
+              </p>
+
+              {/* Descripción de la vista activa */}
+              <div className="mt-3 mb-4 p-2 bg-white/5 rounded-lg border border-white/10">
+                <p className="text-[10px] text-gray-400 leading-relaxed">
+                  {vistaActiva === 'liquidez' 
+                    ? '💡 Liquidez: Todo el dinero que entró en este periodo, sin importar a qué mes de servicio pertenece.'
+                    : '💡 Performance: Solo los ingresos que corresponden al trabajo de este mes específico.'
+                  }
+                </p>
+              </div>
+              
+              {/* Desglose del Neto - Mini Cards */}
+              {resumen && (resumen.pst_balance_neto ?? 0) > 0 && (
+                <div className="space-y-2 mt-4">
+                  <div className="grid grid-cols-2 gap-2">
+                    {/* Mini Card 1: Honorarios */}
+                    <div className="bg-black/20 rounded-xl p-3 backdrop-blur-sm border border-blue-500/20">
+                      <div className="flex items-center gap-2 mb-2">
+                        <div className="p-1.5 bg-blue-500/10 rounded-lg">
+                          <Briefcase className="h-3.5 w-3.5 text-blue-400" />
+                        </div>
+                        <span className="text-[10px] font-medium text-gray-400 uppercase tracking-wide">Honorarios</span>
+                      </div>
+                      <p className="text-lg font-bold text-white">
+                        ${formatCurrency((resumen.total_usd - resumen.total_costos) || 0)}
+                      </p>
+                    </div>
+
+                    {/* Mini Card 2: PST.NET Depositado */}
+                    <div className="bg-black/20 rounded-xl p-3 backdrop-blur-sm border border-fuchsia-500/20">
+                      <div className="flex items-center justify-between mb-2">
+                        <div className="flex items-center gap-2">
+                          <div className="p-1.5 bg-fuchsia-500/10 rounded-lg">
+                            <Wallet className="h-3.5 w-3.5 text-fuchsia-400" />
+                          </div>
+                          <span className="text-[10px] font-medium text-gray-400 uppercase tracking-wide">PST Depositado</span>
+                        </div>
+                        
+                        {/* Botón de actualización */}
+                        <button
+                          onClick={handleSincronizarPst}
+                          disabled={sincronizandoPst}
+                          className="p-1 bg-fuchsia-500/10 hover:bg-fuchsia-500/20 rounded-lg transition-colors disabled:opacity-50"
+                          title="Actualizar balance PST"
+                        >
+                          <RefreshCw className={`h-3 w-3 text-fuchsia-400 ${sincronizandoPst ? 'animate-spin' : ''}`} />
+                        </button>
+                      </div>
+                      
+                      <p className="text-lg font-bold text-fuchsia-400">
+                        ${formatCurrency(resumen.pst_balance_neto || 0)}
+                      </p>
+                      <p className="text-[9px] text-gray-500 mt-1">(50% aplicado)</p>
+                      
+                      {/* Mensaje de feedback */}
+                      {mensajePst && (
+                        <p className="text-[10px] text-fuchsia-400 mt-1 animate-pulse">
+                          {mensajePst}
+                        </p>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Próximo Ingreso (Hold Cashback) - Ancho Completo */}
+                  <div className="bg-black/20 rounded-xl p-4 backdrop-blur-sm border border-amber-500/20">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-3">
+                        <div className="p-2 bg-amber-500/10 rounded-lg">
+                          <Clock className="h-5 w-5 text-amber-400" />
+                        </div>
+                        <div>
+                          <span className="text-xs font-medium text-gray-300 uppercase tracking-wide block">Próximo Ingreso Estimado</span>
+                          <span className="text-[10px] text-gray-500">Esperando depósito de plataforma</span>
+                        </div>
+                      </div>
+                      <div className="text-right">
+                        <p className="text-2xl font-bold text-amber-400">
+                          ${formatCurrency((cashbackHold / 2) || 0)}
+                        </p>
+                        <p className="text-[9px] text-gray-500 mt-1">(50% aplicado)</p>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
             </div>
           </div>
 
@@ -219,7 +507,17 @@ export default function DashboardPage() {
 
         {/* Chart Section */}
         <div className="glass-card rounded-2xl p-4">
-          <h2 className="text-base font-bold text-white mb-4">Ingresos vs Gastos</h2>
+          <div className="mb-4">
+            <h2 className="text-base font-bold text-white">
+              {vistaActiva === 'liquidez' ? '💰 Liquidez vs Gastos' : '📊 Performance Mensual'}
+            </h2>
+            <p className="text-xs text-gray-500 mt-1">
+              {vistaActiva === 'liquidez' 
+                ? 'Todo lo cobrado en este periodo + PST.NET'
+                : 'Ingresos que corresponden al trabajo de este mes + PST.NET'
+              }
+            </p>
+          </div>
           
           <div className="h-72">
             <ResponsiveContainer width="100%" height="100%">
@@ -278,17 +576,28 @@ export default function DashboardPage() {
           <div className="glass-card rounded-xl p-3">
             <p className="text-xs text-gray-400 mb-1">Ratio</p>
             <p className="text-xl font-bold text-neon-green">
-              {resumen?.total_costos ? (resumen.total_usd / resumen.total_costos).toFixed(2) : '0'}x
+              {resumen?.total_costos ? (
+                ((resumen.total_usd + (resumen.pst_balance_neto || 0)) / resumen.total_costos).toFixed(2)
+              ) : '0'}x
             </p>
           </div>
           
           <div className="glass-card rounded-xl p-3">
             <p className="text-xs text-gray-400 mb-1">Margen</p>
             <p className="text-xl font-bold text-neon-green">
-              {resumen?.total_usd ? ((resumen.neto_usd / resumen.total_usd) * 100).toFixed(1) : '0'}%
+              {(resumen?.total_usd || 0) + (resumen?.pst_balance_neto || 0) > 0 ? (
+                (((resumen?.neto_usd || 0) / ((resumen?.total_usd || 0) + (resumen?.pst_balance_neto || 0))) * 100).toFixed(1)
+              ) : '0'}%
             </p>
           </div>
         </div>
+
+        {/* Panel de Tesorería Semanal */}
+        <CobrosPendientesPanel 
+          cobros={cobrosSemana} 
+          totalSemana={totalSemana}
+          onCobroRegistrado={handleCobroRegistrado}
+        />
 
         {/* Accesos Rápidos */}
         <div className="space-y-3">
