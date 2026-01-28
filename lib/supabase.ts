@@ -25,6 +25,7 @@ export interface Cliente {
   activo: boolean
   fee_mensual?: number
   comisiona_agustin: boolean
+  dia_cobro?: number
 }
 
 export interface Ingreso {
@@ -34,6 +35,8 @@ export interface Ingreso {
   monto_ars: number
   fecha_cobro: string
   created_at: string
+  periodo?: string
+  detalle?: string
 }
 
 export interface Costo {
@@ -59,4 +62,18 @@ export interface ResumenFinanciero {
   total_costos: number
   neto_usd: number
   ingresos_proyectados?: number
+  pst_balance_neto?: number
+  pst_incluido?: boolean  // Indica si PST está incluido en neto_usd
+}
+
+export interface CobroDetalle {
+  cliente_id: string
+  cliente_nombre: string
+  fee_monto: number
+  dia_pago: number
+  fecha_exacta: string
+  dias_hasta_vencimiento: number
+  estado_urgencia: 'ATRASADO' | 'HOY' | 'URGENTE' | 'ESTA_SEMANA' | 'NORMAL'
+  total_semana: number
+  ya_cobrado?: boolean
 }

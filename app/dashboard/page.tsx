@@ -180,8 +180,42 @@ export default function DashboardPage() {
       // Neto de honorarios (sin PST)
       const neto_honorarios = total_usd - total_costos
       
-      // NETO TOTAL: Honorarios + Balance PST.NET
-      const neto_usd = neto_honorarios + pst_balance_neto
+      // ============================================================
+      // LÓGICA DE PST.NET - SOLO PARA MES ACTUAL
+      // ============================================================
+      // PST.NET es el saldo de HOY, solo se suma al neto si estamos
+      // viendo el mes ACTUAL. Para meses futuros, no tiene sentido
+      // incluir el saldo actual de PST porque no es un ingreso futuro.
+      
+      // Detectar mes actual en formato MM-YYYY
+      const ahora = new Date()
+      const mesActual = String(ahora.getMonth() + 1).padStart(2, '0')
+      const anioActual = ahora.getFullYear()
+      const periodoActual = `${mesActual}-${anioActual}`
+      
+      const esPeriodoActual = periodoSeleccionado === periodoActual
+      
+      console.log('💰 LÓGICA DE PST.NET:')
+      console.log('   Periodo actual del sistema:', periodoActual)
+      console.log('   Periodo seleccionado:', periodoSeleccionado)
+      console.log('   ¿Es periodo actual?:', esPeriodoActual)
+      console.log('   Balance PST disponible:', pst_balance_neto)
+      
+      // NETO TOTAL: Solo incluye PST si es el mes actual
+      let neto_usd = neto_honorarios
+      let pst_incluido = false
+      
+      if (esPeriodoActual) {
+        neto_usd = neto_honorarios + pst_balance_neto
+        pst_incluido = true
+        console.log('   ✅ PST sumado al Neto Total')
+      } else {
+        console.log('   ⏭️  PST NO sumado (periodo futuro/pasado)')
+      }
+      
+      console.log('   Neto de honorarios:', neto_honorarios)
+      console.log('   PST incluido:', pst_incluido ? pst_balance_neto : 0)
+      console.log('   NETO TOTAL:', neto_usd)
 
       setResumen({
         total_ars,
@@ -189,7 +223,8 @@ export default function DashboardPage() {
         total_costos,
         neto_usd,
         ingresos_proyectados,
-        pst_balance_neto, // Agregamos para mostrar en UI
+        pst_balance_neto, // Para mostrar en UI si es mes actual
+        pst_incluido, // Flag para saber si PST está incluido en el neto
       })
     } catch (error) {
       console.error('Error al cargar datos:', error)
@@ -337,11 +372,12 @@ export default function DashboardPage() {
     return `${meses[parseInt(mes) - 1]} ${anio}`
   }
 
-  // Datos para el gráfico (Ingresos totales incluyen PST.NET)
+  // Datos para el gráfico
+  // PST.NET solo se incluye si es el periodo actual (resumen.pst_incluido)
   const chartData = [
     {
       name: formatearPeriodoGrafico(periodoSeleccionado),
-      Ingresos: (resumen?.total_usd || 0) + (resumen?.pst_balance_neto || 0),
+      Ingresos: (resumen?.total_usd || 0) + (resumen?.pst_incluido ? (resumen?.pst_balance_neto || 0) : 0),
       Gastos: resumen?.total_costos || 0,
     },
   ]
@@ -470,9 +506,20 @@ export default function DashboardPage() {
                   }
                 </p>
               </div>
+
+              {/* Nota: PST solo para mes actual */}
+              {resumen && !resumen.pst_incluido && (resumen.pst_balance_neto ?? 0) > 0 && (
+                <div className="mt-3 mb-4 p-3 bg-amber-500/10 rounded-lg border border-amber-500/20">
+                  <p className="text-[10px] text-amber-400 leading-relaxed font-medium">
+                    ⚠️ PST.NET (${ formatCurrency(resumen.pst_balance_neto || 0)}) no está incluido en este periodo.
+                    El saldo de PST solo se suma al Neto Total del mes actual.
+                  </p>
+                </div>
+              )}
               
               {/* Desglose del Neto - Mini Cards */}
-              {resumen && (resumen.pst_balance_neto ?? 0) > 0 && (
+              {/* Solo mostrar si es periodo actual Y hay PST */}
+              {resumen && resumen.pst_incluido && (resumen.pst_balance_neto ?? 0) > 0 && (
                 <div className="space-y-2 mt-4">
                   <div className="grid grid-cols-2 gap-2">
                     {/* Mini Card 1: Honorarios */}
@@ -584,8 +631,12 @@ export default function DashboardPage() {
             </h2>
             <p className="text-xs text-gray-500 mt-1">
               {vistaActiva === 'liquidez' 
-                ? 'Todo lo cobrado en este periodo + PST.NET'
-                : 'Ingresos que corresponden al trabajo de este mes + PST.NET'
+                ? (resumen?.pst_incluido 
+                    ? 'Todo lo cobrado en este periodo + PST.NET (mes actual)'
+                    : 'Todo lo cobrado en este periodo (PST.NET solo en mes actual)')
+                : (resumen?.pst_incluido
+                    ? 'Ingresos que corresponden al trabajo de este mes + PST.NET (mes actual)'
+                    : 'Ingresos que corresponden al trabajo de este mes (PST.NET solo en mes actual)')
               }
             </p>
           </div>
