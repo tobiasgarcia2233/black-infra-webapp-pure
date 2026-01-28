@@ -34,13 +34,16 @@ export default function DashboardPage() {
   const [mensajePst, setMensajePst] = useState<string | null>(null)
   const [cashbackHold, setCashbackHold] = useState<number>(0)
   const [vistaActiva, setVistaActiva] = useState<'liquidez' | 'performance'>('liquidez')
+  const [refrescando, setRefrescando] = useState(false)
 
   useEffect(() => {
     checkAuth()
   }, [])
 
   useEffect(() => {
-    loadDashboardData()
+    // FORZAR REFRESH al cambiar periodo o vista
+    console.log('🔄 Cambio detectado - Refrescando datos...')
+    loadDashboardData(true)  // Force refresh = true
     loadCobrosPendientes()
   }, [periodoSeleccionado, vistaActiva])
 
@@ -55,7 +58,7 @@ export default function DashboardPage() {
     setUserName(session.user.email?.split('@')[0] || 'Usuario')
   }
 
-  const loadDashboardData = async () => {
+  const loadDashboardData = async (forceRefresh = false) => {
     try {
       setLoading(true)
 
@@ -64,11 +67,37 @@ export default function DashboardPage() {
       // PERFORMANCE: Solo lo que corresponde a este mes de servicio (mes_aplicado)
       const campoFiltro = vistaActiva === 'liquidez' ? 'periodo' : 'mes_aplicado'
       
+      console.log('🔄 Cargando datos del dashboard...')
+      console.log('   Vista:', vistaActiva)
+      console.log('   Periodo:', periodoSeleccionado)
+      console.log('   Campo filtro:', campoFiltro)
+      console.log('   Force refresh:', forceRefresh)
+      
+      // Agregar timestamp para evitar caché del navegador/Supabase
+      const timestamp = forceRefresh ? `?_=${Date.now()}` : ''
+      
       const { data: ingresos, error: ingresosError } = await supabase
         .from('ingresos')
         .select('monto_ars, monto_usd_total, fecha_cobro, periodo, mes_aplicado')
         .eq(campoFiltro, periodoSeleccionado)
+        // Forzar bypass de caché de Supabase
+        .order('created_at', { ascending: false })
 
+      console.log('   Registros encontrados:', ingresos?.length || 0)
+      
+      // Mostrar desglose de ingresos en consola
+      if (ingresos && ingresos.length > 0) {
+        console.log('   📊 DESGLOSE DE INGRESOS:')
+        const totalUSD = ingresos.reduce((sum, ing) => sum + (parseFloat(String(ing.monto_usd_total || 0))), 0)
+        console.log(`   Total USD: $${totalUSD.toFixed(2)}`)
+        console.log('   Primeros 3 registros:')
+        ingresos.slice(0, 3).forEach((ing, idx) => {
+          console.log(`   ${idx + 1}. $${ing.monto_usd_total} - ${ing.fecha_cobro} - periodo:${ing.periodo} - mes_aplicado:${ing.mes_aplicado}`)
+        })
+      } else {
+        console.log('   ⚠️ No se encontraron registros para este periodo/vista')
+      }
+      
       if (ingresosError) throw ingresosError
 
       // Obtener costos del periodo seleccionado (con tipos)
@@ -223,6 +252,32 @@ export default function DashboardPage() {
     loadCobrosPendientes()
   }
 
+  // Función de refresh manual con feedback visual
+  const handleRefreshDashboard = async () => {
+    try {
+      setRefrescando(true)
+      console.log('🔄 REFRESH MANUAL INICIADO')
+      
+      // Forzar recarga sin caché
+      await loadDashboardData(true)
+      await loadCobrosPendientes()
+      
+      console.log('✅ REFRESH COMPLETADO')
+      
+      // Mostrar feedback temporal
+      const originalTitle = document.title
+      document.title = '✓ Actualizado'
+      setTimeout(() => {
+        document.title = originalTitle
+      }, 2000)
+      
+    } catch (error) {
+      console.error('❌ Error en refresh:', error)
+    } finally {
+      setRefrescando(false)
+    }
+  }
+
   const handleSincronizarPst = async () => {
     try {
       setSincronizandoPst(true)
@@ -240,7 +295,7 @@ export default function DashboardPage() {
 
       if (data.success) {
         // Recargar datos del dashboard para mostrar el nuevo balance PST
-        await loadDashboardData()
+        await loadDashboardData(true)  // Force refresh
         setMensajePst('¡Actualizado!')
         
         // Limpiar mensaje después de 2 segundos
@@ -312,13 +367,29 @@ export default function DashboardPage() {
               <h1 className="text-xl font-bold text-white">Dashboard</h1>
               <p className="text-xs text-gray-400">Hola, {userName}</p>
             </div>
-            <button
-              onClick={handleLogout}
-              className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-gray-300 hover:text-white transition-colors glass-card rounded-lg"
-            >
-              <LogOut className="h-4 w-4" />
-              Salir
-            </button>
+            <div className="flex items-center gap-2">
+              {/* Botón de Refresh */}
+              <button
+                onClick={handleRefreshDashboard}
+                disabled={refrescando}
+                className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-neon-green hover:text-white transition-colors glass-card rounded-lg border border-neon-green/20 hover:border-neon-green/40 disabled:opacity-50"
+                title="Actualizar datos desde Supabase"
+              >
+                <RefreshCw className={`h-4 w-4 ${refrescando ? 'animate-spin' : ''}`} />
+                <span className="hidden sm:inline">
+                  {refrescando ? 'Actualizando...' : 'Actualizar'}
+                </span>
+              </button>
+              
+              {/* Botón de Salir */}
+              <button
+                onClick={handleLogout}
+                className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-gray-300 hover:text-white transition-colors glass-card rounded-lg"
+              >
+                <LogOut className="h-4 w-4" />
+                <span className="hidden sm:inline">Salir</span>
+              </button>
+            </div>
           </div>
           
           {/* Time Machine - Selector de Periodo */}
