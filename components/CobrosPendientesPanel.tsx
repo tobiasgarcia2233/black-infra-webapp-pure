@@ -15,9 +15,13 @@ interface CobrosPendientesPanelProps {
 export default function CobrosPendientesPanel({ cobros, totalSemana, onCobroRegistrado }: CobrosPendientesPanelProps) {
   const [expandido, setExpandido] = useState(false)
   const [procesando, setProcesando] = useState<string | null>(null)
+  const [cobrosRegistrados, setCobrosRegistrados] = useState<Set<string>>(new Set())
   const { periodoSeleccionado } = usePeriodo()
 
-  if (cobros.length === 0) return null
+  // Filtrar cobros ya registrados localmente
+  const cobrosPendientes = cobros.filter(c => !cobrosRegistrados.has(c.cliente_id))
+  
+  if (cobrosPendientes.length === 0) return null
 
   // Calcular días restantes hasta una fecha
   const calcularDiasRestantes = (fechaStr: string): number => {
@@ -106,53 +110,69 @@ export default function CobrosPendientesPanel({ cobros, totalSemana, onCobroRegi
       console.log('   Periodo sistema:', periodoSeleccionado)
       console.log('   Mes aplicado (calculado):', mesAplicado)
 
-      // Verificar si ya existe un cobro para este cliente en el mes aplicado
-      // (No puede haber dos cobros del mismo cliente para el mismo mes de servicio)
+      // ============================================================
+      // VERIFICACIÓN DE DUPLICADOS - CRÍTICO
+      // ============================================================
+      // No puede haber dos cobros del mismo cliente para el mismo mes de servicio
       console.log('🔍 Verificando cobros existentes...')
+      console.log('   Buscando:', `cliente_id = ${cobro.cliente_id}, mes_aplicado = ${mesAplicado}`)
       
-      // NOTA: Si la columna mes_aplicado no existe, este query puede fallar
-      // Por eso usamos try-catch para manejarlo
-      let cobroExistente = null
-      let errorVerificacion = null
+      // USAR .maybeSingle() en lugar de .single() para manejar correctamente caso sin resultados
+      const { data: cobroExistente, error: errorVerificacion } = await supabase
+        .from('ingresos')
+        .select('id, periodo, mes_aplicado, monto_usd_total, fecha_cobro')
+        .eq('cliente_id', cobro.cliente_id)
+        .eq('mes_aplicado', mesAplicado)
+        .maybeSingle()  // ← CAMBIO CRÍTICO: maybeSingle() retorna null si no hay resultados
+
+      console.log('   Resultado verificación:', cobroExistente ? 'EXISTE' : 'NO EXISTE')
       
-      try {
-        const result = await supabase
-          .from('ingresos')
-          .select('id, periodo, mes_aplicado')
-          .eq('cliente_id', cobro.cliente_id)
-          .eq('mes_aplicado', mesAplicado)
-          .single()
+      if (errorVerificacion) {
+        console.error('❌ Error en verificación:', errorVerificacion)
         
-        cobroExistente = result.data
-        errorVerificacion = result.error
-      } catch (err) {
-        console.warn('⚠️ Error al verificar mes_aplicado (columna puede no existir):', err)
-        // Si falla la verificación por mes_aplicado, verificar por periodo
-        const resultFallback = await supabase
-          .from('ingresos')
-          .select('id, periodo')
-          .eq('cliente_id', cobro.cliente_id)
-          .eq('periodo', periodoSeleccionado)
-          .single()
-        
-        cobroExistente = resultFallback.data
-        errorVerificacion = resultFallback.error
+        // Si la columna mes_aplicado no existe, hacer fallback a verificación por periodo
+        if (errorVerificacion.code === '42703' || errorVerificacion.message?.includes('column')) {
+          console.warn('⚠️ Columna mes_aplicado no existe, verificando por periodo...')
+          
+          const { data: cobroExistenteLegacy } = await supabase
+            .from('ingresos')
+            .select('id, periodo, monto_usd_total')
+            .eq('cliente_id', cobro.cliente_id)
+            .eq('periodo', periodoSeleccionado)
+            .maybeSingle()
+          
+          if (cobroExistenteLegacy) {
+            toast.error('Este cliente ya fue cobrado en este periodo', { duration: 4000 })
+            console.warn('⚠️ Cobro duplicado bloqueado (verificación por periodo)')
+            setProcesando(null)
+            return
+          }
+        }
       }
 
+      // BLOQUEO CRÍTICO: Si existe el cobro, NO permitir duplicado
       if (cobroExistente) {
         const [mesNum, anioNum] = mesAplicado.split('-')
         const meses = ['Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio', 
                        'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre']
         const nombreMes = meses[parseInt(mesNum) - 1]
         
-        toast.error(`Ya existe un cobro para ${nombreMes} ${anioNum}`)
+        console.warn('🚫 COBRO DUPLICADO BLOQUEADO')
+        console.warn('   Cliente:', cobro.cliente_nombre)
+        console.warn('   Mes aplicado:', mesAplicado)
+        console.warn('   Cobro previo ID:', cobroExistente.id)
+        console.warn('   Monto previo:', cobroExistente.monto_usd_total)
+        console.warn('   Fecha previo:', cobroExistente.fecha_cobro)
+        
+        toast.error(
+          `Este mes ya fue cobrado. Ya existe un cobro de $${cobroExistente.monto_usd_total} para ${nombreMes} ${anioNum}.`,
+          { duration: 5000 }
+        )
         setProcesando(null)
         return
       }
 
-      if (errorVerificacion && errorVerificacion.code !== 'PGRST116') {
-        console.error('❌ Error en verificación de cobros existentes:', errorVerificacion)
-      }
+      console.log('✅ Verificación OK - No hay duplicados')
 
       // Obtener el dólar de conversión actual
       console.log('💵 Obteniendo tasa de conversión...')
@@ -245,6 +265,10 @@ export default function CobrosPendientesPanel({ cobros, totalSemana, onCobroRegi
 
       console.log('✅ REGISTRO COMPLETADO')
       
+      // ACTUALIZAR UI INMEDIATAMENTE - Marcar como cobrado en estado local
+      setCobrosRegistrados(prev => new Set(prev).add(cobro.cliente_id))
+      console.log('🎨 UI actualizada: Cliente removido de lista pendientes')
+      
       // Refrescar datos del dashboard
       onCobroRegistrado()
       
@@ -297,7 +321,7 @@ export default function CobrosPendientesPanel({ cobros, totalSemana, onCobroRegi
             </div>
             <div className="text-left">
               <p className="text-sm font-semibold text-white">Cobros pendientes esta semana</p>
-              <p className="text-xs text-gray-400">{cobros.length} cliente{cobros.length === 1 ? '' : 's'} con vencimiento próximo</p>
+              <p className="text-xs text-gray-400">{cobrosPendientes.length} cliente{cobrosPendientes.length === 1 ? '' : 's'} con vencimiento próximo</p>
             </div>
           </div>
           <div className="flex items-center gap-3">
@@ -323,7 +347,7 @@ export default function CobrosPendientesPanel({ cobros, totalSemana, onCobroRegi
       {expandido && (
         <div className="border-t border-white/5">
           <div className="p-4 space-y-2 max-h-96 overflow-y-auto">
-            {cobros.map((cobro) => {
+            {cobrosPendientes.map((cobro) => {
               const diasRestantes = calcularDiasRestantes(cobro.fecha_exacta)
               return (
                 <div
@@ -402,7 +426,7 @@ export default function CobrosPendientesPanel({ cobros, totalSemana, onCobroRegi
                 💡 Tip: Los cobros atrasados aparecen primero
               </span>
               <span className="text-gray-500">
-                {cobros.filter(c => calcularDiasRestantes(c.fecha_exacta) <= 0).length} urgentes
+                {cobrosPendientes.filter(c => calcularDiasRestantes(c.fecha_exacta) <= 0).length} urgentes
               </span>
             </div>
           </div>
