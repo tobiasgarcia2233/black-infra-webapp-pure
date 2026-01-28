@@ -99,14 +99,45 @@ export default function CobrosPendientesPanel({ cobros, totalSemana, onCobroRegi
       const fechaCobroHoy = new Date()
       const mesAplicado = calcularMesAplicado(fechaCobroHoy)
 
+      console.log('🔵 INICIO DE REGISTRO DE COBRO')
+      console.log('   Cliente:', cobro.cliente_nombre)
+      console.log('   Monto USD:', cobro.fee_monto)
+      console.log('   Fecha cobro:', fechaCobroHoy.toISOString().split('T')[0])
+      console.log('   Periodo sistema:', periodoSeleccionado)
+      console.log('   Mes aplicado (calculado):', mesAplicado)
+
       // Verificar si ya existe un cobro para este cliente en el mes aplicado
       // (No puede haber dos cobros del mismo cliente para el mismo mes de servicio)
-      const { data: cobroExistente, error: errorVerificacion } = await supabase
-        .from('ingresos')
-        .select('id, periodo, mes_aplicado')
-        .eq('cliente_id', cobro.cliente_id)
-        .eq('mes_aplicado', mesAplicado)
-        .single()
+      console.log('🔍 Verificando cobros existentes...')
+      
+      // NOTA: Si la columna mes_aplicado no existe, este query puede fallar
+      // Por eso usamos try-catch para manejarlo
+      let cobroExistente = null
+      let errorVerificacion = null
+      
+      try {
+        const result = await supabase
+          .from('ingresos')
+          .select('id, periodo, mes_aplicado')
+          .eq('cliente_id', cobro.cliente_id)
+          .eq('mes_aplicado', mesAplicado)
+          .single()
+        
+        cobroExistente = result.data
+        errorVerificacion = result.error
+      } catch (err) {
+        console.warn('⚠️ Error al verificar mes_aplicado (columna puede no existir):', err)
+        // Si falla la verificación por mes_aplicado, verificar por periodo
+        const resultFallback = await supabase
+          .from('ingresos')
+          .select('id, periodo')
+          .eq('cliente_id', cobro.cliente_id)
+          .eq('periodo', periodoSeleccionado)
+          .single()
+        
+        cobroExistente = resultFallback.data
+        errorVerificacion = resultFallback.error
+      }
 
       if (cobroExistente) {
         const [mesNum, anioNum] = mesAplicado.split('-')
@@ -120,53 +151,133 @@ export default function CobrosPendientesPanel({ cobros, totalSemana, onCobroRegi
       }
 
       if (errorVerificacion && errorVerificacion.code !== 'PGRST116') {
-        throw errorVerificacion
+        console.error('❌ Error en verificación de cobros existentes:', errorVerificacion)
       }
 
       // Obtener el dólar de conversión actual
+      console.log('💵 Obteniendo tasa de conversión...')
       const { data: configDolar, error: errorDolar } = await supabase
         .from('configuracion')
         .select('valor_numerico')
         .eq('clave', 'dolar_conversion')
         .single()
 
-      if (errorDolar) throw errorDolar
+      if (errorDolar) {
+        console.error('❌ Error al obtener dólar:', errorDolar)
+        throw errorDolar
+      }
 
       const dolarConversion = parseFloat(String(configDolar?.valor_numerico || 1))
       const montoARS = cobro.fee_monto * dolarConversion
 
-      // Registrar el cobro con atribución temporal correcta
-      const { error: errorInsert } = await supabase
+      console.log('   Dólar conversión:', dolarConversion)
+      console.log('   Monto ARS:', montoARS)
+
+      // Preparar el registro con atribución temporal
+      const registroCompleto = {
+        cliente_id: cobro.cliente_id,
+        monto_usd_total: cobro.fee_monto,
+        monto_ars: montoARS,
+        fecha_cobro: fechaCobroHoy.toISOString().split('T')[0],
+        periodo: periodoSeleccionado,
+        mes_aplicado: mesAplicado,
+        detalle: `Cobro adelantado para ${mesAplicado}`
+      }
+
+      console.log('💾 Intentando insertar registro completo (con mes_aplicado)...')
+      console.log('   Datos:', JSON.stringify(registroCompleto, null, 2))
+
+      // Intentar insertar con mes_aplicado
+      let { error: errorInsert } = await supabase
         .from('ingresos')
-        .insert({
+        .insert(registroCompleto)
+
+      // Si falla por columna inexistente, intentar sin mes_aplicado
+      if (errorInsert && (errorInsert.message?.includes('column') || errorInsert.code === '42703')) {
+        console.warn('⚠️ La columna mes_aplicado no existe todavía')
+        console.warn('⚠️ Insertando SIN mes_aplicado (modo legacy)')
+        console.warn('⚠️ IMPORTANTE: Ejecuta migration_atribucion_temporal.sql en Supabase')
+        
+        const registroLegacy = {
           cliente_id: cobro.cliente_id,
           monto_usd_total: cobro.fee_monto,
           monto_ars: montoARS,
-          fecha_cobro: fechaCobroHoy.toISOString().split('T')[0],  // Cuándo entró el dinero
-          periodo: periodoSeleccionado,                             // Periodo del sistema (contexto)
-          mes_aplicado: mesAplicado,                                // Mes del servicio (adelantado)
-          detalle: `Cobro adelantado para ${mesAplicado}`
-        })
+          fecha_cobro: fechaCobroHoy.toISOString().split('T')[0],
+          periodo: periodoSeleccionado,
+          detalle: 'Cobro mensual honorarios'
+        }
 
-      if (errorInsert) throw errorInsert
+        const resultLegacy = await supabase
+          .from('ingresos')
+          .insert(registroLegacy)
+        
+        errorInsert = resultLegacy.error
 
-      // Mostrar mensaje de éxito con claridad sobre la atribución
-      const [mesNum, anioNum] = mesAplicado.split('-')
-      const meses = ['Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio', 
-                     'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre']
-      const nombreMes = meses[parseInt(mesNum) - 1]
-      
-      toast.success(
-        `✅ ${cobro.cliente_nombre}: $${cobro.fee_monto} cobrado para ${nombreMes}`,
-        { duration: 4000 }
-      )
+        if (!errorInsert) {
+          toast.success(
+            `✅ ${cobro.cliente_nombre}: $${cobro.fee_monto} cobrado`,
+            { duration: 3000 }
+          )
+          console.warn('⚠️ Cobro registrado en MODO LEGACY (sin atribución temporal)')
+        }
+      } else if (!errorInsert) {
+        // Éxito con atribución temporal completa
+        const [mesNum, anioNum] = mesAplicado.split('-')
+        const meses = ['Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio', 
+                       'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre']
+        const nombreMes = meses[parseInt(mesNum) - 1]
+        
+        toast.success(
+          `✅ ${cobro.cliente_nombre}: $${cobro.fee_monto} cobrado para ${nombreMes}`,
+          { duration: 4000 }
+        )
+        console.log('✅ Cobro registrado exitosamente con atribución temporal')
+      }
+
+      if (errorInsert) {
+        console.error('❌ ERROR DETALLADO DE SUPABASE:')
+        console.error('   Code:', errorInsert.code)
+        console.error('   Message:', errorInsert.message)
+        console.error('   Details:', errorInsert.details)
+        console.error('   Hint:', errorInsert.hint)
+        throw errorInsert
+      }
+
+      console.log('✅ REGISTRO COMPLETADO')
       
       // Refrescar datos del dashboard
       onCobroRegistrado()
       
-    } catch (error) {
-      console.error('Error al registrar cobro:', error)
-      toast.error('Error al registrar el cobro')
+    } catch (error: any) {
+      console.error('❌ ERROR CRÍTICO AL REGISTRAR COBRO:')
+      console.error('   Error completo:', error)
+      console.error('   Tipo:', typeof error)
+      console.error('   Keys:', Object.keys(error))
+      
+      // Mensaje de error más descriptivo para el usuario
+      let mensajeError = 'Error al registrar el cobro'
+      
+      if (error?.message) {
+        mensajeError = error.message
+      }
+      
+      if (error?.code === '42703') {
+        mensajeError = 'Columna faltante en BD. Ejecuta la migración SQL.'
+      }
+      
+      if (error?.code === '23505') {
+        mensajeError = 'Este cobro ya fue registrado.'
+      }
+      
+      if (error?.message?.includes('permission')) {
+        mensajeError = 'Error de permisos. Verifica RLS en Supabase.'
+      }
+
+      toast.error(mensajeError, { duration: 5000 })
+      console.error('📋 PARA SOLUCIONAR:')
+      console.error('   1. Verifica que migration_atribucion_temporal.sql se ejecutó')
+      console.error('   2. Verifica permisos RLS en tabla ingresos')
+      console.error('   3. Verifica que la columna mes_aplicado existe')
     } finally {
       setProcesando(null)
     }
